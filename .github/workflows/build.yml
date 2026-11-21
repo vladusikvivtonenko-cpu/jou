@@ -1,0 +1,77 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # If the files were uploaded to GitHub without their folders (all .java in the repo root),
+      # put them back where Gradle expects them.
+      - name: Restore folder structure if needed
+        run: |
+          if [ ! -d src/main/java ]; then
+            echo "Flat upload detected - rebuilding folder structure"
+            for f in ./*.java; do
+              [ -e "$f" ] || continue
+              pkg=$(grep -m1 '^package ' "$f" | tr -d '\r' | sed 's/package \(.*\);.*/\1/' | tr . /)
+              mkdir -p "src/main/java/$pkg"
+              mv "$f" "src/main/java/$pkg/"
+            done
+            mkdir -p src/main/resources/assets/ezvisuals/lang
+            [ -f fabric.mod.json ] && mv fabric.mod.json src/main/resources/
+            [ -f ezvisuals.mixins.json ] && mv ezvisuals.mixins.json src/main/resources/
+            [ -f en_us.json ] && mv en_us.json src/main/resources/assets/ezvisuals/lang/
+            true
+          fi
+
+      - name: Check project files
+        run: |
+          for f in build.gradle settings.gradle gradle.properties src/main/resources/fabric.mod.json src/main/resources/ezvisuals.mixins.json; do
+            test -f "$f" || { echo "MISSING FILE IN REPO: $f"; find . -path ./.git -prune -o -type f -print | head -80; exit 1; }
+          done
+          find src -type f | sort
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.12
+
+      - name: Build
+        shell: bash
+        run: gradle build --no-daemon --console=plain 2>&1 | tee build.log
+
+      - name: Show errors
+        if: failure()
+        run: |
+          grep -n -E 'error:' build.log | head -80 || true
+          grep -n -A 20 -E 'What went wrong' build.log | head -60 || true
+
+      - name: Save build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
+      - name: Upload mod jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: ezvisuals-jar
+          path: |
+            build/libs/ezvisuals-*.jar
+            !build/libs/*-sources.jar
+          if-no-files-found: error
